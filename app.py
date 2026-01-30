@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="Amazon Performance Audit", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Amazon Portfolio Audit", page_icon="📊", layout="wide")
 
 # Brand Configuration
 BRAND_MAP = {
@@ -16,40 +16,33 @@ BRAND_MAP = {
 }
 
 def clean_numeric(val):
-    """Removes currency symbols and formatting to keep pure numbers."""
+    """Removes AED/symbols and keeps pure numbers for calculation."""
     if isinstance(val, str):
-        # Specifically handles "AED", non-breaking spaces, and commas
-        cleaned = val.replace('AED', '').replace('$', '').replace('₹', '').replace('\xa0', '').replace(',', '').strip()
-        try:
-            return pd.to_numeric(cleaned)
-        except:
-            return 0.0
-    return val if isinstance(val, (int, float)) else 0.0
+        # Handle AED, smart spaces, and commas
+        cleaned = val.replace('AED', '').replace('$', '').replace('\xa0', '').replace(',', '').strip()
+        try: return pd.to_numeric(cleaned)
+        except: return val
+    return val
 
 def get_brand_robust(name):
-    """Identifies brand using prefixes for campaigns and full names for titles."""
+    """Resilient mapping for both campaign prefixes and full brand titles."""
     if pd.isna(name): return "Unmapped"
-    name_upper = str(name).upper().strip()
+    # Normalize: Remove smart quotes and extra spaces
+    n = str(name).upper().replace('’', "'").replace('LAVENIR', "L'AVENIR").strip()
     
-    # 1. Check for specific prefixes (SP/SB Campaigns)
     for prefix, full_name in BRAND_MAP.items():
-        if any(name_upper.startswith(f"{prefix}{sep}") for sep in ["_", " ", "-", " |", " -"]):
+        fn = full_name.upper().replace('’', "'")
+        # Match Prefix (e.g., CPT | or MA _)
+        if any(n.startswith(f"{prefix}{sep}") for sep in ["_", " ", "-", " |", " -"]):
             return full_name
-            
-    # 2. Check for full brand names (Business Report Titles)
-    for prefix, full_name in BRAND_MAP.items():
-        if full_name.upper() in name_upper:
-            return full_name
-            
-    # 3. Last resort prefix check
-    for prefix, full_name in BRAND_MAP.items():
-        if name_upper.startswith(prefix):
+        # Match Full Name in Title (e.g., CP Trendies Makeup Kit)
+        if fn in n or prefix in n.split():
             return full_name
             
     return "Unmapped"
 
-def find_robust_col(df, keywords, exclude=['acos', 'roas']):
-    """Dynamically finds metric columns while avoiding ratios."""
+def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr']):
+    """Dynamically locates metric columns while avoiding ratios."""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         if any(kw.lower() in col_clean for kw in keywords):
@@ -66,34 +59,35 @@ sb_file = st.sidebar.file_uploader("2. Sponsored Brands Report", type=["csv", "x
 biz_file = st.sidebar.file_uploader("3. Business Report (Total Sales)", type=["csv", "xlsx"])
 
 if sp_file and sb_file and biz_file:
-    def load_data(file):
+    def load_and_process(file):
         df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        # Apply cleaning across all metric-related columns
-        df = df.applymap(clean_numeric) if hasattr(df, 'applymap') else df.map(clean_numeric)
         df.columns = [str(c).strip() for c in df.columns]
+        # Only clean columns that are NOT identifying strings
+        for col in df.columns:
+            if not any(x in col.lower() for x in ['name', 'title', 'term', 'targeting', 'match', 'brand']):
+                df[col] = df[col].apply(clean_numeric)
         return df
 
-    sp_df, sb_df, biz_df = load_data(sp_file), load_data(sb_file), load_data(biz_file)
+    sp_df, sb_df, biz_df = load_and_process(sp_file), load_and_process(sb_file), load_and_process(biz_file)
 
-    # Column Mapping
-    sp_camp_col = find_robust_col(sp_df, ['Campaign Name', 'Campaign'])
-    sb_camp_col = find_robust_col(sb_df, ['Campaign Name', 'Campaign'])
-    sp_sales_col = find_robust_col(sp_df, ['Sales'], exclude=['acos', 'roas', 'cpc', 'ctr'])
-    sb_sales_col = find_robust_col(sb_df, ['Sales'], exclude=['acos', 'roas', 'cpc', 'ctr'])
-    biz_sales_col = find_robust_col(biz_df, ['Ordered Product Sales', 'Sales', 'Revenue'])
-    biz_title_col = find_robust_col(biz_df, ['Title', 'Product Name'])
+    # Dynamic Column Detection
+    sp_sales_col = find_robust_col(sp_df, ['Sales'])
+    sb_sales_col = find_robust_col(sb_df, ['Sales'])
+    biz_sales_col = find_robust_col(biz_df, ['Ordered Product Sales', 'Sales'])
+    biz_title_col = find_robust_col(biz_df, ['Title'])
+
+    # Map Brands
+    sp_df['Brand'] = sp_df['Campaign Name'].apply(get_brand_robust)
+    sb_df['Brand'] = sb_df['Campaign Name'].apply(get_brand_robust)
+    biz_df['Brand'] = biz_df[biz_title_col].apply(get_brand_robust)
 
     # Aggregate Ads (SP + SB)
-    sp_df['Brand'] = sp_df[sp_camp_col].apply(get_brand_robust) if sp_camp_col else "Unmapped"
-    sb_df['Brand'] = sb_df[sb_camp_col].apply(get_brand_robust) if sb_camp_col else "Unmapped"
-    
-    ad_metrics = {'Spend': 'sum', 'Clicks': 'sum', 'Impressions': 'sum'}
-    sp_grouped = sp_df.groupby('Brand').agg({**ad_metrics, sp_sales_col: 'sum'}).rename(columns={sp_sales_col: 'Ad Sales'})
-    sb_grouped = sb_df.groupby('Brand').agg({**ad_metrics, sb_sales_col: 'sum'}).rename(columns={sb_sales_col: 'Ad Sales'})
+    metrics = {'Spend': 'sum', 'Clicks': 'sum', 'Impressions': 'sum'}
+    sp_grouped = sp_df.groupby('Brand').agg({**metrics, sp_sales_col: 'sum'}).rename(columns={sp_sales_col: 'Ad Sales'})
+    sb_grouped = sb_df.groupby('Brand').agg({**metrics, sb_sales_col: 'sum'}).rename(columns={sb_sales_col: 'Ad Sales'})
     total_ads = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
 
-    # Process Business Report
-    biz_df['Brand'] = biz_df[biz_title_col].apply(get_brand_robust) if biz_title_col else "Unmapped"
+    # Aggregate Business
     total_biz = biz_df.groupby('Brand')[biz_sales_col].sum().reset_index().rename(columns={biz_sales_col: 'Total Sales'})
 
     # Final Combined DataFrame
@@ -106,7 +100,7 @@ if sp_file and sb_file and biz_file:
     final_df['TACOS'] = round(final_df['Spend'] / final_df['Total Sales'], 4).replace([np.inf, -np.inf], 0).fillna(0)
     final_df['Ad Contribution'] = round(final_df['Ad Sales'] / final_df['Total Sales'], 4).replace([np.inf, -np.inf], 0).fillna(0)
 
-    # UI Tabs
+    # UI Construction
     tabs = st.tabs(["🌍 Portfolio Overview"] + sorted(list(BRAND_MAP.values())))
 
     with tabs[0]:
@@ -125,7 +119,7 @@ if sp_file and sb_file and biz_file:
             row = final_df[final_df['Brand'] == brand_name]
             if not row.empty:
                 r = row.iloc[0]
-                st.subheader(f"Historical Performance: {brand_name}")
+                st.subheader(f"Historical Audit: {brand_name}")
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Overall Sales", f"{r['Total Sales']:,.2f}")
                 k2.metric("Ad Sales", f"{r['Ad Sales']:,.2f}")
@@ -137,12 +131,12 @@ if sp_file and sb_file and biz_file:
                 k7.metric("Clicks", f"{int(r['Clicks'])}")
                 k8.metric("Impressions", f"{int(r['Impressions'])}")
             else:
-                st.warning(f"No relevant data detected for {brand_name}. Check mapping.")
+                st.warning(f"No data detected for {brand_name}. Please verify campaign naming.")
 
-    # Export Logic
+    # Export
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        final_df.to_excel(writer, sheet_name='OVERALL_AUDIT', index=False)
-    st.sidebar.download_button("📥 Download Master Audit Report", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
+        final_df.to_excel(writer, sheet_name='PORTFOLIO_AUDIT', index=False)
+    st.sidebar.download_button("📥 Download Audit Report", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
 else:
     st.info("Upload SP, SB, and Business reports to view the combined historical overview.")
