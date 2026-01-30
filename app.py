@@ -81,6 +81,7 @@ st.title("Amazon Master Dashboard: Organic vs. Ads")
 st.sidebar.header("Upload Files")
 ads_file = st.sidebar.file_uploader("1. Search Term Report (Ads)", type=["csv", "xlsx"])
 biz_file = st.sidebar.file_uploader("2. Business Report (Total Sales)", type=["csv", "xlsx"])
+brand_st_file = st.sidebar.file_uploader("3. Brand Search Term Report (Search Analytics)", type=["csv", "xlsx"])
 
 if ads_file:
     # 1. Load Ads
@@ -103,7 +104,13 @@ if ads_file:
         biz_df['Brand'] = biz_df[title_col].apply(identify_brand_from_title)
         total_sales_map = biz_df.groupby('Brand')[biz_sales_col].sum().to_dict()
 
-    # 3. UI Tabs
+    # 3. Load Brand ST Report (New)
+    brand_st_df = None
+    if brand_st_file:
+        brand_st_df = pd.read_csv(brand_st_file) if brand_st_file.name.endswith('.csv') else pd.read_excel(brand_st_file)
+        st.sidebar.success("Brand Search Term Report Loaded")
+
+    # 4. UI Tabs
     unique_brands = sorted(ads_df['Brand'].unique())
     tabs = st.tabs(["🌍 Overall Portfolio"] + unique_brands)
 
@@ -126,11 +133,19 @@ if ads_file:
             summary_for_export.append({'Brand': brand, 'Total Sales': b_total, 'Ad Sales': b_ads[ad_sales_col].sum(), 'Organic Sales': m['organic_sales'], 'Ad Contribution %': m['ad_contrib'], 'Ad Spend': b_ads['Spend'].sum(), 'ACOS': m['acos'], 'TACOS': m['tacos']})
 
             st.divider()
+            
+            # Show Brand Search Term Data if available
+            if brand_st_df is not None:
+                st.subheader(f"🔍 Brand Search Analytics - {brand}")
+                st.caption("Insights from the uploaded Brand Search Term Report")
+                st.dataframe(brand_st_df, use_container_width=True)
+                st.divider()
+
             st.subheader("Search Term Drilldown")
             detail = b_ads.groupby(['Campaign Name', search_col]).agg({'Impressions':'sum','Clicks':'sum','Spend':'sum',ad_sales_col:'sum',ad_orders_col:'sum'}).reset_index()
             st.dataframe(detail.sort_values(by=ad_sales_col, ascending=False), use_container_width=True)
 
-    # 4. Export
+    # 5. Export
     st.divider()
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
