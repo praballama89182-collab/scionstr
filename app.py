@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="PPC Portfolio Analyzer", page_icon="📊", layout="wide")
+st.set_page_config(page_title="PPC & Total Sales Analyzer", page_icon="📊", layout="wide")
 
-# Brand Mapping
+# Updated Brand Mapping
 BRAND_MAP = {
     'MA': 'Maison de l’Avenir',
     'CL': 'Creation Lamis',
@@ -15,13 +15,31 @@ BRAND_MAP = {
     'CPT': 'CP Trendies'
 }
 
-st.title("Amazon Master Portfolio Dashboard")
-st.write("Combined overview and individual brand analysis with 'AED' cleaning.")
+# Keywords for Business Report mapping (since it has no Campaign Name)
+BRAND_KEYWORDS = {
+    'Maison de l’Avenir': ['MAISON DE L’AVENIR', 'MAISON DE LAVENIR'],
+    'Creation Lamis': ['CREATION LAMIS', 'CREATION DELUXE', 'CREATION'],
+    'Jean Paul Dupont': ['JEAN PAUL DUPONT', 'JPD'],
+    'Paris Collection': ['PARIS COLLECTION'],
+    'Dorall Collection': ['DORALL COLLECTION'],
+    'CP Trendies': ['CP TRENDIES', 'CPT']
+}
 
-uploaded_file = st.file_uploader("Upload Search Term Report", type=["csv", "xlsx"])
+def clean_numeric(val):
+    if isinstance(val, str):
+        cleaned = val.replace('AED', '').replace('\xa0', '').replace(',', '').strip()
+        try: return pd.to_numeric(cleaned)
+        except: return val
+    return val
+
+def identify_brand_from_title(title):
+    title_upper = str(title).upper()
+    for brand, keywords in BRAND_KEYWORDS.items():
+        if any(kw in title_upper for kw in keywords):
+            return brand
+    return 'Other'
 
 def calculate_metrics(df, sales_col, orders_col):
-    """Accurately calculates rates and ratios."""
     df['CTR'] = (df['Clicks'] / df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CPC'] = (df['Spend'] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CVR'] = (df[orders_col] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -29,99 +47,84 @@ def calculate_metrics(df, sales_col, orders_col):
     df['ROAS'] = (df[sales_col] / df['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
     return df
 
-def display_metric_row(label, data, s_col, o_col):
-    """Helper to display the 7-column metric row."""
-    t_spend = data['Spend'].sum()
-    t_sales = data[s_col].sum()
-    t_imps = data['Impressions'].sum()
-    t_clicks = data['Clicks'].sum()
-    t_orders = data[o_col].sum()
+st.title("Amazon Master Dashboard: Ads + Total Sales")
+st.sidebar.header("Upload Files")
+ads_file = st.sidebar.file_uploader("1. Upload Search Term Report (Ads)", type=["csv", "xlsx"])
+biz_file = st.sidebar.file_uploader("2. Upload Business Report (Total Sales)", type=["csv", "xlsx"])
+
+if ads_file:
+    # --- PROCESS ADS DATA ---
+    ads_df = pd.read_csv(ads_file, encoding='utf-8-sig') if ads_file.name.endswith('.csv') else pd.read_excel(ads_file)
+    ads_df = ads_df.map(clean_numeric)
+    ads_df.columns = [c.strip() for c in ads_df.columns]
     
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.metric(f"Total Spends", f"{t_spend:,.2f}")
-    c2.metric(f"Total Sales", f"{t_sales:,.2f}")
-    c3.metric("Impressions", f"{t_imps:,}")
-    c4.metric("Clicks", f"{t_clicks:,}")
-    c5.metric("CTR", f"{(t_clicks/t_imps):.2%}" if t_imps > 0 else "0%")
-    c6.metric("ROAS", f"{(t_sales/t_spend):.2f}" if t_spend > 0 else "0.00")
-    c7.metric("CVR", f"{(t_orders/t_clicks):.2%}" if t_clicks > 0 else "0%")
-
-if uploaded_file:
-    ext = uploaded_file.name.split('.')[-1]
+    # Identify Brand and calculate metrics
+    ads_df['Brand'] = ads_df['Campaign Name'].apply(lambda x: BRAND_MAP.get(str(x).replace('|', '_').split('_')[0].strip().upper(), str(x).replace('|', '_').split('_')[0].strip().upper()))
     
-    # 1. Load & Clean Data
-    if ext == 'csv':
-        try:
-            df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-        except:
-            df = pd.read_csv(uploaded_file, encoding='cp1252')
-    else:
-        df = pd.read_excel(uploaded_file)
+    search_col = next((c for c in ads_df.columns if 'Search Term' in c), 'Customer Search Term')
+    ad_sales_col = next((c for c in ads_df.columns if 'Sales' in c), '7 Day Total Sales')
+    ad_orders_col = next((c for c in ads_df.columns if 'Orders' in c), '7 Day Total Orders')
 
-    df = df.map(lambda x: pd.to_numeric(str(x).replace('AED', '').replace('aed', '').replace(',', '').strip(), errors='ignore') if isinstance(x, str) else x)
-    df.columns = [c.strip() for c in df.columns]
-
-    # 2. Identify Columns
-    search_col = next((c for c in df.columns if 'Search Term' in c), 'Customer Search Term')
-    sales_col = next((c for c in df.columns if 'Sales' in c), '7 Day Total Sales')
-    orders_col = next((c for c in df.columns if 'Orders' in c), '7 Day Total Orders')
-
-    # 3. Brand Identification
-    df['Brand'] = df['Campaign Name'].apply(lambda x: BRAND_MAP.get(str(x).replace('|', '_').split('_')[0].strip().upper(), str(x).replace('|', '_').split('_')[0].strip().upper()))
-    unique_brands = sorted(df['Brand'].unique())
+    # --- PROCESS BUSINESS DATA ---
+    total_sales_map = {}
+    if biz_file:
+        biz_df = pd.read_csv(biz_file) if biz_file.name.endswith('.csv') else pd.read_excel(biz_file)
+        biz_df = biz_df.map(clean_numeric)
+        title_col = 'Title' if 'Title' in biz_df.columns else biz_df.columns[2]
+        sales_val_col = 'Ordered Product Sales' if 'Ordered Product Sales' in biz_df.columns else biz_df.columns[-2]
+        
+        biz_df['Brand'] = biz_df[title_col].apply(identify_brand_from_title)
+        total_sales_map = biz_df.groupby('Brand')[sales_val_col].sum().to_dict()
 
     # --- UI TABS ---
-    all_tabs_names = ["🌍 Overall Portfolio"] + unique_brands
-    tabs = st.tabs(all_tabs_names)
+    unique_brands = sorted(ads_df['Brand'].unique())
+    tabs = st.tabs(["🌍 Overall Portfolio"] + unique_brands)
 
-    # TAB 1: OVERALL PORTFOLIO
+    # OVERALL TAB
     with tabs[0]:
-        st.subheader("Combined Performance (All Brands)")
-        display_metric_row("Portfolio", df, sales_col, orders_col)
-        st.divider()
-        st.write("### Brand-wise Summary")
-        brand_summary_table = df.groupby('Brand').agg({
-            'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum',
-            sales_col: 'sum', orders_col: 'sum'
-        }).reset_index()
-        brand_summary_table = calculate_metrics(brand_summary_table, sales_col, orders_col)
-        st.dataframe(brand_summary_table.style.format({
-            'CTR': '{:.2%}', 'CVR': '{:.2%}', 'ACOS': '{:.2%}', 'ROAS': '{:.2f}', 'CPC': '{:.2f}', 'Spend': '{:.2f}', sales_col: '{:.2f}'
-        }), use_container_width=True)
+        t_spend = ads_df['Spend'].sum()
+        t_ad_sales = ads_df[ad_sales_col].sum()
+        t_overall_sales = sum(total_sales_map.values())
+        
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Spends", f"{t_spend:,.2f}")
+        c2.metric("Ad Sales", f"{t_ad_sales:,.2f}")
+        c3.metric("Overall Sales", f"{t_overall_sales:,.2f}" if biz_file else "Upload Biz Report")
+        c4.metric("Total ROAS", f"{(t_ad_sales/t_spend):.2f}" if t_spend > 0 else "0.00")
+        c5.metric("TACOS", f"{(t_spend/t_overall_sales):.2%}" if t_overall_sales > 0 else "N/A")
 
-    # INDIVIDUAL BRAND TABS
+    # BRAND TABS
     for i, brand in enumerate(unique_brands):
         with tabs[i+1]:
-            brand_raw = df[df['Brand'] == brand]
-            st.subheader(f"🚀 {brand} Overview")
-            display_metric_row(brand, brand_raw, sales_col, orders_col)
-            st.divider()
-            
-            st.subheader("🔍 Search Term & Campaign Detail")
-            detail = brand_raw.groupby(['Campaign Name', search_col]).agg({
-                'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', sales_col: 'sum', orders_col: 'sum'
-            }).reset_index()
-            detail = calculate_metrics(detail, sales_col, orders_col).sort_values(by=sales_col, ascending=False)
-            st.dataframe(detail.style.format({
-                'CTR': '{:.2%}', 'CVR': '{:.2%}', 'ACOS': '{:.2%}', 'ROAS': '{:.2f}', 'CPC': '{:.2f}', 'Spend': '{:.2f}', sales_col: '{:.2f}'
-            }), use_container_width=True)
+            brand_ads = ads_df[ads_df['Brand'] == brand]
+            b_spend = brand_ads['Spend'].sum()
+            b_ad_sales = brand_ads[ad_sales_col].sum()
+            b_overall = total_sales_map.get(brand, 0.0)
 
-    # --- EXPORT LOGIC ---
+            st.subheader(f"🚀 {brand} Summary")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Ad Spends", f"{b_spend:,.2f}")
+            col2.metric("Ad Sales", f"{b_ad_sales:,.2f}")
+            col3.metric("Overall Sales", f"{b_overall:,.2f}")
+            col4.metric("TACOS", f"{(b_spend/b_overall):.2%}" if b_overall > 0 else "N/A")
+
+            # Search Term Detail
+            detail = brand_ads.groupby(['Campaign Name', search_col]).agg({'Impressions':'sum','Clicks':'sum','Spend':'sum',ad_sales_col:'sum',ad_orders_col:'sum'}).reset_index()
+            st.dataframe(calculate_metrics(detail, ad_sales_col, ad_orders_col).sort_values(by=ad_sales_col, ascending=False), use_container_width=True)
+
+    # --- EXPORT ---
     st.divider()
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Sheet 1: Total Portfolio Overview
-        portfolio_summary = pd.DataFrame([{'Brand': 'TOTAL PORTFOLIO', 'Impressions': df['Impressions'].sum(), 'Clicks': df['Clicks'].sum(), 'Spend': df['Spend'].sum(), 'Sales': df[sales_col].sum(), 'Orders': df[orders_col].sum()}])
-        calculate_metrics(portfolio_summary, 'Sales', 'Orders').to_excel(writer, sheet_name='TOTAL_PORTFOLIO', index=False)
+        # Overview Sheet
+        summary_data = []
+        for b in unique_brands:
+            b_raw = ads_df[ads_df['Brand'] == b]
+            summary_data.append({'Brand': b, 'Spends': b_raw['Spend'].sum(), 'Ad Sales': b_raw[ad_sales_col].sum(), 'Overall Sales': total_sales_map.get(b, 0)})
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name='OVERVIEW', index=False)
         
-        # Sheet 2: Brand Comparison
-        brand_summary_table.to_excel(writer, sheet_name='BRAND_COMPARISON', index=False)
-        
-        # Subsequent Sheets: Individual Brands
-        for brand in unique_brands:
-            brand_data = df[df['Brand'] == brand].groupby(['Campaign Name', search_col]).agg({
-                'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', sales_col: 'sum', orders_col: 'sum'
-            }).reset_index()
-            calculate_metrics(brand_data, sales_col, orders_col).sort_values(by=sales_col, ascending=False).to_excel(writer, sheet_name=brand[:31], index=False)
+        for b in unique_brands:
+            sheet_df = ads_df[ads_df['Brand'] == b].groupby(['Campaign Name', search_col]).agg({'Spend':'sum', ad_sales_col:'sum'}).reset_index()
+            sheet_df.to_excel(writer, sheet_name=b[:31], index=False)
 
-    st.download_button(label="📥 Download Master Multi-Tab Report", data=output.getvalue(), file_name=f"Master_Report_{uploaded_file.name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    st.download_button("📥 Download Multi-Tab Master Report", data=output.getvalue(), file_name="Master_Brand_Report.xlsx", use_container_width=True)
