@@ -5,7 +5,7 @@ from io import BytesIO
 
 st.set_page_config(page_title="PPC Brand Analyzer Pro", page_icon="📊", layout="wide")
 
-# Brand Mapping
+# Updated Brand Mapping
 BRAND_MAP = {
     'MA': 'Maison de l’Avenir',
     'CL': 'Creation Lamis',
@@ -15,13 +15,13 @@ BRAND_MAP = {
     'CPT': 'CP Trendies'
 }
 
-st.title("Amazon Search Term & Campaign Performance")
-st.write("Organizing reports by Brand and Campaign with calculated PPC metrics.")
+st.title("Amazon Brand Performance Dashboard")
+st.write("Summary metrics and search term analysis by Brand.")
 
 uploaded_file = st.file_uploader("Upload Search Term Report", type=["csv", "xlsx"])
 
 def calculate_metrics(df, sales_col, orders_col):
-    """Accurately calculates rates and ratios."""
+    """Accurately calculates rates and ratios for dataframes."""
     df['CTR'] = (df['Clicks'] / df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CPC'] = (df['Spend'] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CVR'] = (df[orders_col] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -52,17 +52,12 @@ if uploaded_file:
         return val
 
     df = df.map(clean_numeric)
-
-    # 3. Identify columns dynamically
-    # Note: Using .strip() on column names to handle Amazon's hidden trailing spaces
     df.columns = [c.strip() for c in df.columns]
-    
+
+    # 3. Dynamic Column Selection
     search_col = next((c for c in df.columns if 'Search Term' in c), 'Customer Search Term')
     sales_col = next((c for c in df.columns if 'Sales' in c), '7 Day Total Sales')
     orders_col = next((c for c in df.columns if 'Orders' in c), '7 Day Total Orders')
-    impressions_col = 'Impressions'
-    clicks_col = 'Clicks'
-    spend_col = 'Spend'
 
     # 4. Brand Identification
     def get_brand_name(campaign):
@@ -77,38 +72,57 @@ if uploaded_file:
 
     for i, brand in enumerate(unique_brands):
         with tabs[i]:
-            st.subheader(f"{brand} Search Term Performance")
+            # Filter brand data
+            brand_raw = df[df['Brand'] == brand]
             
-            # Group by Campaign AND Search Term
-            brand_summary = df[df['Brand'] == brand].groupby(['Campaign Name', search_col]).agg({
-                impressions_col: 'sum',
-                clicks_col: 'sum',
-                spend_col: 'sum',
+            # --- OVERVIEW SECTION ---
+            st.subheader(f"🚀 {brand} Overview")
+            
+            # Calculate Brand Totals
+            total_spend = brand_raw['Spend'].sum()
+            total_sales = brand_raw[sales_col].sum()
+            total_imps = brand_raw['Impressions'].sum()
+            total_clicks = brand_raw['Clicks'].sum()
+            total_orders = brand_raw[orders_col].sum()
+            
+            # Calculate Brand Rates
+            brand_ctr = (total_clicks / total_imps) if total_imps > 0 else 0
+            brand_roas = (total_sales / total_spend) if total_spend > 0 else 0
+            brand_cvr = (total_orders / total_clicks) if total_clicks > 0 else 0
+
+            # Display Metrics in Columns
+            col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+            col1.metric("Spends", f"{total_spend:,.2f}")
+            col2.metric("Sales", f"{total_sales:,.2f}")
+            col3.metric("Impressions", f"{total_imps:,}")
+            col4.metric("Clicks", f"{total_clicks:,}")
+            col5.metric("CTR", f"{brand_ctr:.2%}")
+            col6.metric("ROAS", f"{brand_roas:.2f}")
+            col7.metric("CVR", f"{brand_cvr:.2%}")
+
+            st.divider()
+
+            # --- SEARCH TERM TABLE ---
+            st.subheader("🔍 Search Term & Campaign Detail")
+            brand_summary = brand_raw.groupby(['Campaign Name', search_col]).agg({
+                'Impressions': 'sum',
+                'Clicks': 'sum',
+                'Spend': 'sum',
                 sales_col: 'sum',
                 orders_col: 'sum'
             }).reset_index()
 
-            # Calculate metrics on grouped data
             brand_summary = calculate_metrics(brand_summary, sales_col, orders_col)
-            
-            # Sort by Sales
             brand_summary = brand_summary.sort_values(by=sales_col, ascending=False)
 
-            # Display with professional formatting
             st.dataframe(brand_summary.style.format({
-                'CTR': '{:.2%}',
-                'CVR': '{:.2%}',
-                'ACOS': '{:.2%}',
-                'ROAS': '{:.2f}',
-                'CPC': '{:.2f}',
-                spend_col: '{:.2f}',
+                'CTR': '{:.2%}', 'CVR': '{:.2%}', 'ACOS': '{:.2%}',
+                'ROAS': '{:.2f}', 'CPC': '{:.2f}', 'Spend': '{:.2f}',
                 sales_col: '{:.2f}'
             }), use_container_width=True)
 
-    # 6. Final Export
+    # 6. Global Export
     st.divider()
-    
-    # Clean the global report for export
     full_export = df.copy()
     full_export = calculate_metrics(full_export, sales_col, orders_col)
     
@@ -117,9 +131,9 @@ if uploaded_file:
         full_export.to_excel(writer, index=False)
     
     st.download_button(
-        label="📥 Download Full Cleaned Report with Metrics",
+        label="📥 Download Master Report",
         data=output.getvalue(),
-        file_name=f"Cleaned_{uploaded_file.name}.xlsx",
+        file_name=f"Master_Brand_Report_{uploaded_file.name}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
