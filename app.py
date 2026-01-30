@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="PPC & Organic Projections", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Amazon Performance Overview", page_icon="📊", layout="wide")
 
 # Brand Configuration
 BRAND_MAP = {
@@ -17,142 +17,150 @@ BRAND_MAP = {
 
 def clean_numeric(val):
     if isinstance(val, str):
-        cleaned = val.replace('AED', '').replace('₹', '').replace('\xa0', '').replace(',', '').strip()
+        cleaned = val.replace('AED', '').replace('$', '').replace('\xa0', '').replace(',', '').strip()
         try: return pd.to_numeric(cleaned)
         except: return val
     return val
 
-def get_brand(campaign_name):
-    if pd.isna(campaign_name): return "Unmapped"
-    name = str(campaign_name).upper().strip()
+def get_brand_from_name(name):
+    if pd.isna(name): return "Unmapped"
+    name_upper = str(name).upper().strip()
     for prefix, full_name in BRAND_MAP.items():
-        if any(name.startswith(f"{prefix}{sep}") for sep in ["_", " ", "-", " |", " -"]):
+        if any(sep in name_upper for sep in [f"{prefix}_", f"{prefix} ", f"{prefix}-", f"{prefix} |"]):
             return full_name
     for prefix, full_name in BRAND_MAP.items():
-        if prefix in name:
+        if prefix in name_upper:
             return full_name
     return "Unmapped"
 
-def find_col(df, primary_keywords, exclude_keywords=[]):
-    """Fuzzy search for column names while excluding irrelevant ones like ACOS."""
-    cols = df.columns
-    # First pass: look for exact-ish matches
-    for col in cols:
-        col_lower = col.lower()
-        if any(pk.lower() in col_lower for pk in primary_keywords):
-            if not any(ek.lower() in col_lower for ek in exclude_keywords):
+def find_metric_col(df, keywords, exclude=['acos', 'roas']):
+    for col in df.columns:
+        if any(kw.lower() in col.lower() for kw in keywords):
+            if not any(ex.lower() in col.lower() for ex in exclude):
                 return col
     return None
 
-st.title("📊 Amazon Master Projections")
+st.title("📊 Amazon Portfolio Performance Overview")
+st.markdown("### Historical Audit (SP + SB + Business Report)")
 
-# --- SIDEBAR SETTINGS ---
-st.sidebar.header("🚀 Growth Settings")
-roas_uplift = st.sidebar.slider("ROAS Uplift (%)", 0, 100, 20) / 100
-organic_lift = st.sidebar.slider("Organic Lift (%)", 0, 50, 5) / 100
-spend_growth = st.sidebar.slider("Spend Growth (%)", -50, 200, 0) / 100
-
-st.sidebar.divider()
 st.sidebar.header("Upload Files")
 sp_file = st.sidebar.file_uploader("1. Sponsored Products Report", type=["csv", "xlsx"])
 sb_file = st.sidebar.file_uploader("2. Sponsored Brands Report", type=["csv", "xlsx"])
 biz_file = st.sidebar.file_uploader("3. Business Report (Total Sales)", type=["csv", "xlsx"])
 
 if sp_file and sb_file and biz_file:
-    def load_df(file):
+    # 1. Load Data
+    def load_data(file):
         df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        df = df.applymap(clean_numeric) # Compatibility fix
-        df.columns = [str(c).strip() for c in df.columns] 
+        df = df.applymap(clean_numeric)
+        df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    sp_df = load_df(sp_file)
-    sb_df = load_df(sb_file)
-    biz_df = load_df(biz_file)
-    
-    # Standardizing Columns
-    metrics_map = {
-        'Spend': ['Spend', 'Cost'],
-        'Clicks': ['Clicks'],
-        'Impressions': ['Impressions', 'Imps'],
-        'Sales': ['Total Sales', 'Sales', 'Revenue']
+    sp_df = load_data(sp_file)
+    sb_df = load_data(sb_file)
+    biz_df = load_data(biz_file)
+
+    # 2. Map Columns
+    sp_sales_col = find_metric_col(sp_df, ['Sales'])
+    sb_sales_col = find_metric_col(sb_df, ['Sales'])
+    biz_sales_col = find_metric_col(biz_df, ['Sales', 'Revenue'])
+    biz_title_col = find_metric_col(biz_df, ['Title', 'Product Name'])
+
+    # 3. Aggregate Ad Metrics by Brand
+    sp_df['Brand'] = sp_df['Campaign Name'].apply(get_brand_from_name)
+    sb_df['Brand'] = sb_df['Campaign Name'].apply(get_brand_from_name)
+
+    ad_agg = {
+        'Spend': 'sum',
+        'Clicks': 'sum',
+        'Impressions': 'sum'
     }
-    exclude_for_sales = ['ACOS', 'ROAS', 'CPC', 'CTR']
 
-    # Identify dynamic columns
-    sp_camp_col = find_col(sp_df, ['Campaign Name', 'Campaign'])
-    sb_camp_col = find_col(sb_df, ['Campaign Name', 'Campaign'])
+    sp_grouped = sp_df.groupby('Brand').agg({**ad_agg, sp_sales_col: 'sum'}).rename(columns={sp_sales_col: 'Ad Sales'})
+    sb_grouped = sb_df.groupby('Brand').agg({**ad_agg, sb_sales_col: 'sum'}).rename(columns={sb_sales_col: 'Ad Sales'})
     
-    sp_cols = {m: find_col(sp_df, k, exclude_for_sales if m == 'Sales' else []) for m, k in metrics_map.items()}
-    sb_cols = {m: find_col(sb_df, k, exclude_for_sales if m == 'Sales' else []) for m, k in metrics_map.items()}
+    # Merge SP and SB
+    total_ads = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
+
+    # 4. Aggregate Business Metrics by Brand
+    biz_df['Brand'] = biz_df[biz_title_col].apply(get_brand_from_name)
+    total_biz = biz_df.groupby('Brand')[biz_sales_col].sum().reset_index().rename(columns={biz_sales_col: 'Total Sales'})
+
+    # 5. Combine and Calculate Audit Metrics
+    final_df = pd.merge(total_ads, total_biz, on='Brand', how='outer').fillna(0)
     
-    biz_sales_col = find_col(biz_df, ['Sales', 'Revenue'], ['ACOS', 'ROAS'])
-    biz_title_col = find_col(biz_df, ['Title', 'Product Name'])
+    # Filter for known brands only
+    final_df = final_df[final_df['Brand'].isin(BRAND_MAP.values())]
 
-    # Aggregate Ads
-    sp_df['Brand'] = sp_df[sp_camp_col].apply(get_brand) if sp_camp_col else "Unmapped"
-    sb_df['Brand'] = sb_df[sb_camp_col].apply(get_brand) if sb_camp_col else "Unmapped"
+    def calc_metrics(df):
+        df['Organic Sales'] = df['Total Sales'] - df['Ad Sales']
+        df['Ad Contrib %'] = (df['Ad Sales'] / df['Total Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['Organic Contrib %'] = (df['Organic Sales'] / df['Total Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['ROAS'] = (df['Ad Sales'] / df['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['ACOS'] = (df['Spend'] / df['Ad Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['TACOS'] = (df['Spend'] / df['Total Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['CTR'] = (df['Clicks'] / df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
+        df['CPC'] = (df['Spend'] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
+        return df
 
-    def group_ads(df, col_map):
-        agg_dict = {col_map[m]: 'sum' for m in ['Spend', 'Sales', 'Clicks', 'Impressions'] if col_map[m]}
-        rename_dict = {col_map['Sales']: 'Ad Sales', col_map['Spend']: 'Spend', col_map['Clicks']: 'Clicks', col_map['Impressions']: 'Impressions'}
-        return df.groupby('Brand').agg(agg_dict).rename(columns=rename_dict)
+    final_df = calc_metrics(final_df)
 
-    sp_grouped = group_ads(sp_df, sp_cols)
-    sb_grouped = group_ads(sb_df, sb_cols)
-    ads_combined = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
+    # UI Structure
+    tabs = st.tabs(["🌍 Portfolio Overview"] + list(BRAND_MAP.values()))
 
-    # Process Business Data
-    biz_df['Brand'] = biz_df[biz_title_col].apply(lambda x: next((v for k,v in BRAND_MAP.items() if k in str(x).upper()), "Unmapped")) if biz_title_col else "Unmapped"
-    biz_grouped = biz_df.groupby('Brand')[biz_sales_col].sum().reset_index().rename(columns={biz_sales_col: 'Total Sales'})
-
-    # Final Merge
-    final_baseline = pd.merge(ads_combined, biz_grouped, on='Brand', how='left').fillna(0)
-    
-    brand_metrics = []
-    for _, row in final_baseline.iterrows():
-        if row['Brand'] == "Unmapped": continue
-        
-        c_spend, c_ad_sales, c_total_sales = row['Spend'], row['Ad Sales'], row['Total Sales']
-        c_roas = c_ad_sales / c_spend if c_spend > 0 else 0
-        c_org_pct = (c_total_sales - c_ad_sales) / c_total_sales if c_total_sales > 0 else 0
-        c_cpc, c_ctr = c_spend / row['Clicks'] if row['Clicks'] > 0 else 0, row['Clicks'] / row['Impressions'] if row['Impressions'] > 0 else 0
-        
-        # Growth
-        t_spend = c_spend * (1 + spend_growth)
-        t_roas = c_roas * (1 + roas_uplift)
-        t_ad_rev = t_spend * t_roas
-        t_org_pct = min(0.95, c_org_pct + organic_lift)
-        t_total_rev = t_ad_rev / (1 - t_org_pct) if t_org_pct < 1 else t_ad_rev
-        
-        brand_metrics.append({
-            'Brand': row['Brand'], 'Imp': int((t_spend/c_cpc)/c_ctr) if c_cpc>0 and c_ctr>0 else 0,
-            'Clicks': int(t_spend/c_cpc) if c_cpc>0 else 0, 'Spends': round(t_spend, 2),
-            'ROAS': round(t_roas, 2), 'Ad Revenue': round(t_ad_rev, 2), 'Organic (%)': round(t_org_pct, 4),
-            'Paid (%)': round(1 - t_org_pct, 4), 'Organic Revenue': round(t_total_rev - t_ad_rev, 2), 
-            'Overall Revenue': round(t_total_rev, 2), 'T-ROAS': round(t_total_rev / t_spend, 2) if t_spend > 0 else 0,
-            'T-ACOS': round(t_spend / t_total_rev, 4) if t_total_rev > 0 else 0
-        })
-
-    proj_df = pd.DataFrame(brand_metrics)
-    
-    # UI and Export Logic...
-    tabs = st.tabs(["🌎 Amazon Portfolio"] + proj_df['Brand'].tolist())
-    # (Rest of UI and Export code as before...)
+    # Tab 1: Overall Summary
     with tabs[0]:
-        st.subheader("Combined Platform Projections")
-        st.dataframe(proj_df, use_container_width=True, hide_index=True)
+        st.subheader("Combined Portfolio Metrics")
+        portfolio_totals = final_df.select_dtypes(include=[np.number]).sum()
+        
+        # Calculate rates for portfolio
+        p_roas = portfolio_totals['Ad Sales'] / portfolio_totals['Spend']
+        p_tacos = portfolio_totals['Spend'] / portfolio_totals['Total Sales']
+        p_ad_contrib = portfolio_totals['Ad Sales'] / portfolio_totals['Total Sales']
 
-    # Simplified weekly logic for brevity in this snippet
-    weights = [0.30, 0.20, 0.20, 0.20, 0.10]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Sales", f"AED {portfolio_totals['Total Sales']:,.2f}")
+        c2.metric("Portfolio ROAS", f"{p_roas:.2f}")
+        c3.metric("Avg TACOS", f"{p_tacos:.1%}")
+        c4.metric("Ad Contribution", f"{p_ad_contrib:.1%}")
+
+        st.divider()
+        st.dataframe(final_df.sort_values(by='Total Sales', ascending=False), hide_index=True, use_container_width=True)
+
+    # Brand Tabs
+    for i, brand_name in enumerate(BRAND_MAP.values()):
+        with tabs[i+1]:
+            b_data = final_df[final_df['Brand'] == brand_name]
+            if not b_data.empty:
+                row = b_data.iloc[0]
+                st.subheader(f"Metrics for {brand_name}")
+                
+                # Metric Cards
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Overall Sales", f"{row['Total Sales']:,.2f}")
+                m2.metric("Ad Sales", f"{row['Ad Sales']:,.2f}")
+                m3.metric("Organic Sales", f"{row['Organic Sales']:,.2f}")
+                m4.metric("Ad Contribution", f"{row['Ad Contrib %']:.1%}")
+
+                m5, m6, m7, m8 = st.columns(4)
+                m5.metric("ROAS", f"{row['ROAS']:.2f}")
+                m6.metric("ACOS", f"{row['ACOS']:.1%}")
+                m7.metric("TACOS", f"{row['TACOS']:.1%}")
+                m8.metric("CPC", f"{row['CPC']:.2f}")
+
+                st.divider()
+                st.write("### Brand Data Summary")
+                st.table(b_data)
+            else:
+                st.warning(f"No data found for {brand_name}")
+
+    # Export
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        proj_df.to_excel(writer, sheet_name='Combined_Overview', index=False)
-        for i, brand in enumerate(proj_df['Brand'].tolist()):
-            b_row = proj_df[proj_df['Brand'] == brand].iloc[0]
-            weekly_rows = [{"Week": f"Week {w+1}", "Overall Revenue": round(b_row['Overall Revenue']*wt, 2)} for w, wt in enumerate(weights)]
-            pd.DataFrame(weekly_rows).to_excel(writer, sheet_name=brand[:31], startrow=4, index=False)
-
-    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_Platform_Projections.xlsx")
+        final_df.to_excel(writer, sheet_name='PORTFOLIO_OVERVIEW', index=False)
+        for brand in BRAND_MAP.values():
+            final_df[final_df['Brand'] == brand].to_excel(writer, sheet_name=brand[:31], index=False)
+    st.sidebar.download_button("📥 Download Audit Report", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
 
 else:
-    st.info("Please upload all three reports (SP, SB, and Business) to start.")
+    st.info("Please upload SP Search Term, SB Search Term, and Business reports to generate the overview.")
