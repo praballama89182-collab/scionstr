@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="PPC & Organic Master Projections", page_icon="📊", layout="wide")
+st.set_page_config(page_title="PPC & Organic Projections", page_icon="📊", layout="wide")
 
 # Brand Configuration
 BRAND_MAP = {
@@ -23,13 +23,27 @@ def clean_numeric(val):
     return val
 
 def get_brand(campaign_name):
+    if pd.isna(campaign_name): return "Unmapped"
     name = str(campaign_name).upper().strip()
     for prefix, full_name in BRAND_MAP.items():
-        if any(sep in name for sep in [f"{prefix}_", f"{prefix} ", f"{prefix}-", f"{prefix} |"]):
+        # Matches prefix followed by common separators
+        if any(name.startswith(f"{prefix}{sep}") for sep in ["_", " ", "-", " |"]):
+            return full_name
+    # Fallback: contains check
+    for prefix, full_name in BRAND_MAP.items():
+        if prefix in name:
             return full_name
     return "Unmapped"
 
-st.title("📊 Amazon Master Projections (Aggregate SP + SB)")
+def find_col(df, keywords):
+    """Finds a column name in a dataframe that contains any of the keywords (case-insensitive)."""
+    for col in df.columns:
+        if any(kw.lower() in col.lower() for kw in keywords):
+            return col
+    return None
+
+st.title("📊 Amazon Master Projections")
+st.info("Combined SP + SB Advertising & Organic Growth Model")
 
 # --- SIDEBAR SETTINGS ---
 st.sidebar.header("🚀 Growth Settings")
@@ -44,40 +58,44 @@ sb_file = st.sidebar.file_uploader("2. Sponsored Brands Report", type=["csv", "x
 biz_file = st.sidebar.file_uploader("3. Business Report (Total Sales)", type=["csv", "xlsx"])
 
 if sp_file and sb_file and biz_file:
-    # Load and Clean Data
-    sp_df = pd.read_csv(sp_file).map(clean_numeric) if sp_file.name.endswith('.csv') else pd.read_excel(sp_file).map(clean_numeric)
-    sb_df = pd.read_csv(sb_file).map(clean_numeric) if sb_file.name.endswith('.csv') else pd.read_excel(sb_file).map(clean_numeric)
-    biz_df = pd.read_csv(biz_file).map(clean_numeric) if biz_file.name.endswith('.csv') else pd.read_excel(biz_file).map(clean_numeric)
-    
-    # Identify Ad Sales Columns (SP uses 7-day, SB uses 14-day usually)
-    sp_sales_col = next((c for c in sp_df.columns if 'Sales' in c), None)
-    sb_sales_col = next((c for c in sb_df.columns if 'Sales' in c), None)
-    biz_sales_col = next((c for c in biz_df.columns if 'Sales' in c), None)
+    # 1. Load and Standardize Column Names
+    def load_df(file):
+        df = pd.read_csv(file).map(clean_numeric) if file.name.endswith('.csv') else pd.read_excel(file).map(clean_numeric)
+        df.columns = [str(c).strip() for c in df.columns] # Strip whitespace from headers
+        return df
 
-    # Process SP
-    sp_df['Brand'] = sp_df['Campaign Name'].apply(get_brand)
+    sp_df = load_df(sp_file)
+    sb_df = load_df(sb_file)
+    biz_df = load_df(biz_file)
+    
+    # 2. Identify Dynamic Columns
+    sp_camp_col = find_col(sp_df, ['Campaign Name', 'Campaign'])
+    sb_camp_col = find_col(sb_df, ['Campaign Name', 'Campaign'])
+    sp_sales_col = find_col(sp_df, ['Sales'])
+    sb_sales_col = find_col(sb_df, ['Sales'])
+    biz_sales_col = find_col(biz_df, ['Sales', 'Revenue'])
+    biz_title_col = find_col(biz_df, ['Title', 'Product Name'])
+
+    # 3. Aggregate Ad Data (SP + SB)
+    sp_df['Brand'] = sp_df[sp_camp_col].apply(get_brand) if sp_camp_col else "Unmapped"
+    sb_df['Brand'] = sb_df[sb_camp_col].apply(get_brand) if sb_camp_col else "Unmapped"
+
     sp_grouped = sp_df.groupby('Brand').agg({'Spend': 'sum', sp_sales_col: 'sum', 'Clicks': 'sum', 'Impressions': 'sum'}).rename(columns={sp_sales_col: 'Ad Sales'})
-    
-    # Process SB
-    sb_df['Brand'] = sb_df['Campaign Name'].apply(get_brand)
     sb_grouped = sb_df.groupby('Brand').agg({'Spend': 'sum', sb_sales_col: 'sum', 'Clicks': 'sum', 'Impressions': 'sum'}).rename(columns={sb_sales_col: 'Ad Sales'})
-
-    # Merge Ads (SP + SB)
-    ads_combined = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
     
-    # Process Business Report
-    title_col = next((c for c in biz_df.columns if 'Title' in c), biz_df.columns[2])
-    biz_df['Brand'] = biz_df[title_col].apply(lambda x: next((v for k,v in BRAND_MAP.items() if k in str(x).upper()), "Unmapped"))
+    ads_combined = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
+
+    # 4. Process Business Data
+    biz_df['Brand'] = biz_df[biz_title_col].apply(lambda x: next((v for k, v in BRAND_MAP.items() if k in str(x).upper()), "Unmapped")) if biz_title_col else "Unmapped"
     biz_grouped = biz_df.groupby('Brand')[biz_sales_col].sum().reset_index().rename(columns={biz_sales_col: 'Total Sales'})
 
-    # Merge Everything
+    # 5. Merge and Calculate Projections
     final_baseline = pd.merge(ads_combined, biz_grouped, on='Brand', how='left').fillna(0)
     
     brand_metrics = []
     for _, row in final_baseline.iterrows():
-        if row['Brand'] == "Unmapped": continue
+        if row['Brand'] == "Unmapped" or row['Brand'] == 0: continue
         
-        # Current baseline ratios
         curr_spend = row['Spend']
         curr_ad_sales = row['Ad Sales']
         curr_total_sales = row['Total Sales']
@@ -107,23 +125,23 @@ if sp_file and sb_file and biz_file:
 
     proj_df = pd.DataFrame(brand_metrics)
     
-    # Overall Platform Summary (Sum of all brands)
-    ts, tar, tor, tr = proj_df['Spends'].sum(), proj_df['Ad Revenue'].sum(), proj_df['Overall Revenue'].sum(), proj_df['Organic Revenue'].sum()
-    platform_total = pd.DataFrame([{
-        'Brand': 'TOTAL AMAZON PLATFORM', 'Imp': int(proj_df['Imp'].sum()), 'Clicks': int(proj_df['Clicks'].sum()),
-        'Spends': round(ts, 2), 'ROAS': round(tar/ts, 2) if ts>0 else 0, 'Ad Revenue': round(tar, 2),
-        'Organic (%)': round(tr/tor, 4) if tor>0 else 0, 'Paid (%)': round(tar/tor, 4) if tor>0 else 0,
-        'Organic Revenue': round(tr, 2), 'Overall Revenue': round(tor, 2), 
-        'T-ROAS': round(tor/ts, 2) if ts>0 else 0, 'T-ACOS': round(ts/tor, 4) if tor>0 else 0
-    }])
-
+    # 6. Build UI Tabs
     tabs = st.tabs(["🌎 Amazon Portfolio"] + proj_df['Brand'].tolist())
 
     with tabs[0]:
-        st.markdown("### 🏆 Combined Amazon Platform Projections")
+        st.subheader("🏆 Combined Amazon Platform Projections")
+        # Sum all projections for the portfolio row
+        ts, tar, tor, tr = proj_df['Spends'].sum(), proj_df['Ad Revenue'].sum(), proj_df['Overall Revenue'].sum(), proj_df['Organic Revenue'].sum()
+        platform_total = pd.DataFrame([{
+            'Brand': 'TOTAL AMAZON PLATFORM', 'Imp': int(proj_df['Imp'].sum()), 'Clicks': int(proj_df['Clicks'].sum()),
+            'Spends': round(ts, 2), 'ROAS': round(tar/ts, 2) if ts>0 else 0, 'Ad Revenue': round(tar, 2),
+            'Organic (%)': round(tr/tor, 4) if tor>0 else 0, 'Paid (%)': round(tar/tor, 4) if tor>0 else 0,
+            'Organic Revenue': round(tr, 2), 'Overall Revenue': round(tor, 2), 
+            'T-ROAS': round(tor/ts, 2) if ts>0 else 0, 'T-ACOS': round(ts/tor, 4) if tor>0 else 0
+        }])
         st.dataframe(platform_total, use_container_width=True, hide_index=True)
         st.divider()
-        st.markdown("### 🏢 Brand-Wise Summary")
+        st.subheader("🏢 Brand-Wise Monthly Summary")
         st.dataframe(proj_df, use_container_width=True, hide_index=True)
 
     weights = [0.30, 0.20, 0.20, 0.20, 0.10]
@@ -138,8 +156,7 @@ if sp_file and sb_file and biz_file:
                 st.subheader(f"📊 {brand} Projections")
                 st.dataframe(pd.DataFrame([b_row]), use_container_width=True, hide_index=True)
                 st.divider()
-                st.markdown("#### 📅 Weekly Segregation")
-                # Weekly Rows calculation...
+                st.markdown("#### 📅 Weekly Segregation (30/20/20/20/10)")
                 weekly_rows = [{"Week": f"Week {w+1}", "Imp": int(b_row['Imp']*wt), "Clicks": int(b_row['Clicks']*wt),
                                 "Spends": round(b_row['Spends']*wt, 2), "ROAS": b_row['ROAS'], "Ad Revenue": round(b_row['Ad Revenue']*wt, 2),
                                 "Organic (%)": b_row['Organic (%)'], "Paid (%)": b_row['Paid (%)'], 
@@ -147,7 +164,12 @@ if sp_file and sb_file and biz_file:
                                 "T-ROAS": b_row['T-ROAS'], "T-ACOS": b_row['T-ACOS']} for w, wt in enumerate(weights)]
                 weekly_df = pd.DataFrame(weekly_rows)
                 st.dataframe(weekly_df, use_container_width=True, hide_index=True)
+                
+                # Excel: Brand Sheet (Monthly on top, Weekly below)
                 pd.DataFrame([b_row]).to_excel(writer, sheet_name=brand[:31], index=False)
                 weekly_df.to_excel(writer, sheet_name=brand[:31], startrow=4, index=False)
 
-    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_Platform_Master_Report.xlsx", use_container_width=True)
+    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_Platform_Projections.xlsx", use_container_width=True)
+
+else:
+    st.info("Upload SP, SB, and Business reports to generate the Amazon Portfolio projections.")
