@@ -55,7 +55,7 @@ def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr', 'rate']
     return None
 
 def calculate_audit_kpis(df):
-    """Calculates all performance ratios safely."""
+    """Calculates performance ratios safely."""
     df['CTR'] = (df['Clicks'] / df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CVR'] = (df['Orders'] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     df['ROAS'] = (df['Ad Sales'] / df['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -118,29 +118,30 @@ if sp_file and sb_file and biz_file:
 
     with tabs[0]:
         st.subheader("Global Portfolio Performance Summary")
-        numeric_cols = final_df.select_dtypes(include=[np.number])
-        totals = numeric_cols.sum()
+        totals = final_df.select_dtypes(include=[np.number]).sum()
         
-        # Calculate Global Metrics
+        # Calculate Global Aggregates
         p_roas = totals['Ad Sales'] / totals['Spend'] if totals['Spend'] > 0 else 0
-        p_ctr = totals['Clicks'] / totals['Impressions'] if totals['Impressions'] > 0 else 0
         p_cvr = totals['Orders'] / totals['Clicks'] if totals['Clicks'] > 0 else 0
         p_acos = totals['Spend'] / totals['Ad Sales'] if totals['Ad Sales'] > 0 else 0
         p_tacos = totals['Spend'] / totals['Total Sales'] if totals['Total Sales'] > 0 else 0
 
-        # Row 1
+        # Row 1: Focus on Spend and Sales
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Total Sales", f"{totals['Total Sales']:,.2f}")
         c2.metric("Ad Sales", f"{totals['Ad Sales']:,.2f}")
-        c3.metric("Spend", f"{totals['Spend']:,.2f}")
+        c3.metric("Ad Spend", f"{totals['Spend']:,.2f}")  # Replaced CTR
         c4.metric("ROAS", f"{p_roas:.2f}")
-        c5.metric("CTR", f"{p_ctr:.2%}")
+        c5.metric("CVR", f"{p_cvr:.2%}")
 
-        # Row 2
+        # Row 2: Contribution & Efficiency
         c6, c7, c8, c9, c10 = st.columns(5)
-        c6.metric("CVR", f"{p_cvr:.2%}")
-        c7.metric("ACOS", f"{p_acos:.1%}")
-        c8.metric("TACOS", f"{p_tacos:.1%}")
+        paid_c = totals['Ad Sales'] / totals['Total Sales'] if totals['Total Sales'] > 0 else 0
+        org_c = 1 - paid_c
+        c6.metric("Paid Contribution", f"{paid_c:.1%}")
+        c7.metric("Organic Contribution", f"{org_c:.1%}")
+        c8.metric("ACOS", f"{p_acos:.1%}")
+        c9.metric("TACOS", f"{p_tacos:.1%}")
         
         st.divider()
         st.dataframe(final_df.sort_values(by='Total Sales', ascending=False), hide_index=True, use_container_width=True)
@@ -153,24 +154,25 @@ if sp_file and sb_file and biz_file:
                 r = b_row.iloc[0]
                 st.subheader(f"Performance: {brand_name}")
                 
+                # Metric Row 1: Primary Value
                 br1_c1, br1_c2, br1_c3, br1_c4, br1_c5 = st.columns(5)
                 br1_c1.metric("Total Sales", f"{r['Total Sales']:,.2f}")
                 br1_c2.metric("Ad Sales", f"{r['Ad Sales']:,.2f}")
-                br1_c3.metric("Organic Sales", f"{r['Organic Sales']:,.2f}")
+                br1_c3.metric("Ad Spend", f"{r['Spend']:,.2f}") # Replaced CTR
                 br1_c4.metric("ROAS", f"{r['ROAS']:.2f}")
-                br1_c5.metric("CTR", f"{r['CTR']:.2%}")
+                br1_c5.metric("CVR", f"{r['CVR']:.2%}")
                 
+                # Metric Row 2: Efficiency
                 br2_c1, br2_c2, br2_c3, br2_c4, br2_c5 = st.columns(5)
-                br2_c1.metric("CVR", f"{r['CVR']:.2%}")
+                br2_c1.metric("Organic Sales", f"{r['Organic Sales']:,.2f}")
                 br2_c2.metric("Paid Contrib", f"{r['Paid Contrib']:.1%}")
                 br2_c3.metric("Organic Contrib", f"{r['Organic Contrib']:.1%}")
                 br2_c4.metric("ACOS", f"{r['ACOS']:.1%}")
                 br2_c5.metric("TACOS", f"{r['TACOS']:.1%}")
 
                 st.divider()
-                st.subheader("Granular Campaign Performance")
+                st.subheader("Campaign Details")
                 
-                # --- SAFE FILTERING TO PREVENT KEYERROR ---
                 def get_safe_details(df, b_name, s_col, sales_col, ord_col):
                     cols = ['Campaign Name', 'Impressions', 'Clicks', 'Spend']
                     if s_col and s_col in df.columns: cols.append(s_col)
@@ -186,15 +188,13 @@ if sp_file and sb_file and biz_file:
                 if not b_sp_clean.empty or not b_sb_clean.empty:
                     detail = pd.concat([b_sp_clean, b_sb_clean], ignore_index=True).sort_values(by='Sales', ascending=False)
                     st.dataframe(detail, use_container_width=True, hide_index=True)
-                else:
-                    st.info("No campaign-level details available for this brand.")
             else:
                 st.warning(f"No relevant data found for {brand_name}.")
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         final_df.to_excel(writer, sheet_name='PORTFOLIO_AUDIT', index=False)
-    st.sidebar.download_button("📥 Download Master Audit Report", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
+    st.sidebar.download_button("📥 Download Master Audit", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
 
 else:
-    st.info("Please upload all three reports (SP, SB, and Business) to begin the audit.")
+    st.info("Upload reports to generate your performance audit.")
