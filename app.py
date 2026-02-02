@@ -16,9 +16,8 @@ BRAND_MAP = {
 }
 
 def clean_numeric(val):
-    """Safely converts currency strings to pure numbers for mathematical analysis."""
+    """Safely converts currency strings to pure numbers."""
     if isinstance(val, str):
-        # Removes AED, symbols, and non-breaking spaces (\xa0)
         cleaned = val.replace('AED', '').replace('$', '').replace('\xa0', '').replace(',', '').strip()
         try:
             return pd.to_numeric(cleaned)
@@ -31,17 +30,14 @@ def get_brand_robust(name):
     if pd.isna(name): return "Unmapped"
     n = str(name).upper().replace('’', "'").replace('LAVENIR', "L'AVENIR").strip()
     
-    # 1. Match Prefix (Campaign Names)
     for prefix, full_name in BRAND_MAP.items():
         if any(n.startswith(f"{prefix}{sep}") for sep in ["_", " ", "-", " |", " -"]):
             return full_name
             
-    # 2. Match Full Name (Product Titles)
     for prefix, full_name in BRAND_MAP.items():
         if full_name.upper().replace('’', "'") in n:
             return full_name
             
-    # 3. Last Resort: Individual Word match
     words = n.split()
     for prefix, full_name in BRAND_MAP.items():
         if prefix in words:
@@ -59,7 +55,7 @@ def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr', 'rate']
     return None
 
 def calculate_audit_kpis(df):
-    """Calculates all performance ratios for ads and organic contribution."""
+    """Calculates all performance ratios safely."""
     df['CTR'] = (df['Clicks'] / df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
     df['CVR'] = (df['Orders'] / df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     df['ROAS'] = (df['Ad Sales'] / df['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -94,7 +90,7 @@ if sp_file and sb_file and biz_file:
     sb_df['Brand'] = sb_df['Campaign Name'].apply(get_brand_robust)
     
     title_col = find_robust_col(biz_df, ['Title', 'Product Name'])
-    biz_df['Brand'] = biz_df[title_col].apply(get_brand_robust)
+    biz_df['Brand'] = biz_df[title_col].apply(get_brand_robust) if title_col else "Unmapped"
 
     # 2. Identify Columns
     sp_sales_col = find_robust_col(sp_df, ['Sales'])
@@ -108,31 +104,31 @@ if sp_file and sb_file and biz_file:
     metrics = {'Spend': 'sum', 'Clicks': 'sum', 'Impressions': 'sum'}
     sp_grouped = sp_df.groupby('Brand').agg({**metrics, sp_sales_col: 'sum', sp_orders_col: 'sum'}).rename(columns={sp_sales_col: 'Ad Sales', sp_orders_col: 'Orders'})
     sb_grouped = sb_df.groupby('Brand').agg({**metrics, sb_sales_col: 'sum', sb_orders_col: 'sum'}).rename(columns={sb_sales_col: 'Ad Sales', sb_orders_col: 'Orders'})
+    
     total_ads = sp_grouped.add(sb_grouped, fill_value=0).reset_index()
     total_biz = biz_df.groupby('Brand')[biz_sales_col].sum().reset_index().rename(columns={biz_sales_col: 'Total Sales'})
 
     # Final Combined DataFrame
-    final_df = calculate_audit_kpis(pd.merge(total_ads, total_biz, on='Brand', how='outer').fillna(0))
+    final_df = pd.merge(total_ads, total_biz, on='Brand', how='outer').fillna(0)
+    final_df = calculate_audit_kpis(final_df)
     final_df = final_df[final_df['Brand'] != "Unmapped"]
 
     # --- UI LAYOUT ---
     tabs = st.tabs(["🌎 Portfolio Overview"] + sorted(list(BRAND_MAP.values())))
 
-    # Overview Tab
     with tabs[0]:
         st.subheader("Global Portfolio Performance Summary")
-        totals = final_df.select_dtypes(include=[np.number]).sum()
+        numeric_cols = final_df.select_dtypes(include=[np.number])
+        totals = numeric_cols.sum()
         
-        # Recalculate Totals Logic
+        # Calculate Global Metrics
         p_roas = totals['Ad Sales'] / totals['Spend'] if totals['Spend'] > 0 else 0
         p_ctr = totals['Clicks'] / totals['Impressions'] if totals['Impressions'] > 0 else 0
         p_cvr = totals['Orders'] / totals['Clicks'] if totals['Clicks'] > 0 else 0
         p_acos = totals['Spend'] / totals['Ad Sales'] if totals['Ad Sales'] > 0 else 0
         p_tacos = totals['Spend'] / totals['Total Sales'] if totals['Total Sales'] > 0 else 0
-        p_paid_c = totals['Ad Sales'] / totals['Total Sales'] if totals['Total Sales'] > 0 else 0
-        p_org_c = (totals['Total Sales'] - totals['Ad Sales']) / totals['Total Sales'] if totals['Total Sales'] > 0 else 0
 
-        # ROW 1 (5 Metrics)
+        # Row 1
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Total Sales", f"{totals['Total Sales']:,.2f}")
         c2.metric("Ad Sales", f"{totals['Ad Sales']:,.2f}")
@@ -140,14 +136,12 @@ if sp_file and sb_file and biz_file:
         c4.metric("ROAS", f"{p_roas:.2f}")
         c5.metric("CTR", f"{p_ctr:.2%}")
 
-        # ROW 2 (5 Metrics)
+        # Row 2
         c6, c7, c8, c9, c10 = st.columns(5)
         c6.metric("CVR", f"{p_cvr:.2%}")
-        c7.metric("Paid Contribution", f"{p_paid_c:.1%}")
-        c8.metric("Organic Contribution", f"{p_org_c:.1%}")
-        c9.metric("ACOS", f"{p_acos:.1%}")
-        c10.metric("TACOS", f"{p_tacos:.1%}")
-
+        c7.metric("ACOS", f"{p_acos:.1%}")
+        c8.metric("TACOS", f"{p_tacos:.1%}")
+        
         st.divider()
         st.dataframe(final_df.sort_values(by='Total Sales', ascending=False), hide_index=True, use_container_width=True)
 
@@ -159,7 +153,6 @@ if sp_file and sb_file and biz_file:
                 r = b_row.iloc[0]
                 st.subheader(f"Performance: {brand_name}")
                 
-                # Applying same 5-per-row structure to brand tabs for consistency
                 br1_c1, br1_c2, br1_c3, br1_c4, br1_c5 = st.columns(5)
                 br1_c1.metric("Total Sales", f"{r['Total Sales']:,.2f}")
                 br1_c2.metric("Ad Sales", f"{r['Ad Sales']:,.2f}")
@@ -175,14 +168,26 @@ if sp_file and sb_file and biz_file:
                 br2_c5.metric("TACOS", f"{r['TACOS']:.1%}")
 
                 st.divider()
-                st.subheader("Granular Campaign & Search Term Performance")
-                b_sp = sp_df[sp_df['Brand'] == brand_name][['Campaign Name', search_col, 'Impressions', 'Clicks', 'Spend', sp_sales_col, sp_orders_col]]
-                b_sp.rename(columns={sp_sales_col: 'Sales', sp_orders_col: 'Orders'}, inplace=True)
-                b_sb = sb_df[sb_df['Brand'] == brand_name][['Campaign Name', search_col, 'Impressions', 'Clicks', 'Spend', sb_sales_col, sb_orders_col]]
-                b_sb.rename(columns={sb_sales_col: 'Sales', sb_orders_col: 'Orders'}, inplace=True)
+                st.subheader("Granular Campaign Performance")
                 
-                detail = pd.concat([b_sp, b_sb]).sort_values(by='Sales', ascending=False)
-                st.dataframe(detail, use_container_width=True, hide_index=True)
+                # --- SAFE FILTERING TO PREVENT KEYERROR ---
+                def get_safe_details(df, b_name, s_col, sales_col, ord_col):
+                    cols = ['Campaign Name', 'Impressions', 'Clicks', 'Spend']
+                    if s_col and s_col in df.columns: cols.append(s_col)
+                    if sales_col and sales_col in df.columns: cols.append(sales_col)
+                    if ord_col and ord_col in df.columns: cols.append(ord_col)
+                    
+                    filtered = df[df['Brand'] == b_name][cols].copy()
+                    return filtered.rename(columns={sales_col: 'Sales', ord_col: 'Orders'})
+
+                b_sp_clean = get_safe_details(sp_df, brand_name, search_col, sp_sales_col, sp_orders_col)
+                b_sb_clean = get_safe_details(sb_df, brand_name, search_col, sb_sales_col, sb_orders_col)
+                
+                if not b_sp_clean.empty or not b_sb_clean.empty:
+                    detail = pd.concat([b_sp_clean, b_sb_clean], ignore_index=True).sort_values(by='Sales', ascending=False)
+                    st.dataframe(detail, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No campaign-level details available for this brand.")
             else:
                 st.warning(f"No relevant data found for {brand_name}.")
 
@@ -192,4 +197,4 @@ if sp_file and sb_file and biz_file:
     st.sidebar.download_button("📥 Download Master Audit Report", data=output.getvalue(), file_name="Amazon_Portfolio_Audit.xlsx", use_container_width=True)
 
 else:
-    st.info("Upload SP, SB, and Business reports to generate the performance audit.")
+    st.info("Please upload all three reports (SP, SB, and Business) to begin the audit.")
